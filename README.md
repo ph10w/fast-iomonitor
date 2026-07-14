@@ -150,16 +150,23 @@ thumbprint most recently imported is recorded in `.iomonitor-cert-state.json`.
 If the WDK certificate changes, the script removes only the previous certificate
 recorded for IoMonitor; other WDK certificates remain untouched.
 
-The script copies the service to `%ProgramFiles%\IoMonitor`, registers it as an
-automatically started `LocalSystem` service, and adds the `IoMonitor` minifilter
-as a dependency. On restart, the Service Control Manager therefore starts the
-minifilter first and the broker afterward.
+The script copies the service to `%ProgramFiles%\IoMonitor`, registers it as a
+manually started `LocalSystem` service, and adds the `IoMonitor` minifilter as a
+dependency. It leaves the broker stopped after installation. When
+`IoMonitorClient.exe` knows the target PIDs, it starts the service before opening
+the monitoring connection and then waits for its named pipe; the Service Control
+Manager starts the dependent minifilter first. While the client is waiting for a
+named process to appear, the broker remains stopped. After draining the event
+queue, the client stops the broker service again.
 
-Standard users are intentionally not granted permission to start or stop the
-service. This is not required for logging because the service runs automatically.
-Its named pipe accepts only local, authenticated users. Before setting the target
-PIDs, the service also verifies that every target process belongs to the same
-Windows user as the connected client.
+The installation script grants the Windows user that runs it permission to query,
+start, and stop the broker service without later elevation. It identifies the
+user by SID, preserves the existing service security descriptor, and verifies the
+new access-control entry with `sc sdshow`. It does not grant permission to change
+the service configuration or its security descriptor. The named pipe accepts only
+local, authenticated users. Before setting the target PIDs, the service also
+verifies that every target process belongs to the same Windows user as the
+connected client.
 
 ## Record file operations
 

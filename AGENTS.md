@@ -9,11 +9,11 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
 ## Architektur und stabile Schnittstellen
 
 - `driver/` enthält `IoMonitor.sys`, den Kernel-Minifilter.
-- `service/` enthält `IoMonitorService.exe`, einen automatisch gestarteten
-  `LocalSystem`-Broker zwischen Treiber und normalem Benutzerclient.
+- `service/` enthält `IoMonitorService.exe`, einen bei Bedarf vom Client
+  gestarteten `LocalSystem`-Broker zwischen Treiber und normalem Benutzerclient.
 - `client/` enthält `IoMonitorClient.exe`, der ohne Administratorrechte läuft.
 - `shared/io_monitor_protocol.h` definiert das feste Nachrichtenformat für
-  Treiber, Dienst und Client. Die aktuelle Protokollversion ist 4.
+  Treiber, Dienst und Client. Die aktuelle Protokollversion ist 5.
 - Der sichtbare Projektname ist **Fast IoMonitor**. Interne Laufzeitkennungen wie
   `IoMonitor`, `IoMonitorService`, `IoMonitor.sys`, Filter-Port und Named Pipe
   bleiben aus Kompatibilitätsgründen bestehen. Nicht ohne ausdrücklichen
@@ -25,6 +25,8 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
 ## Gewünschtes Laufzeitverhalten
 
 - Der Client akzeptiert `--process-name` oder alternativ `--pid`.
+- Sobald die Ziel-PIDs bekannt sind, startet der Client den Broker-Dienst und
+  beendet ihn nach dem Leeren der Event-Queue beim eigenen Abschluss wieder.
 - Ist bei `--process-name` noch kein Prozess vorhanden, wartet der Client und
   sucht alle 500 ms. `Strg+C` muss auch diese Wartephase beenden.
 - Nach dem ersten Treffer werden die zu diesem Zeitpunkt gefundenen PIDs

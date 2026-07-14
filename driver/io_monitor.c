@@ -47,7 +47,7 @@ static DECLSPEC_CACHEALIGN volatile LONG64 gSequence = 0;
 static volatile LONG64 gDroppedEvents = 0;
 
 static VOID IoMonClearQueue(VOID);
-static VOID IoMonStopTargets(VOID);
+static VOID IoMonStopTargets(_In_ BOOLEAN ClearQueue);
 
 static FLT_PREOP_CALLBACK_STATUS
 IoMonPreOperation(
@@ -438,7 +438,9 @@ IoMonClearQueue(VOID)
 }
 
 static VOID
-IoMonStopTargets(VOID)
+IoMonStopTargets(
+    _In_ BOOLEAN ClearQueue
+    )
 {
     LONG wasActive;
     ULONG bloomIndex;
@@ -466,7 +468,9 @@ IoMonStopTargets(VOID)
         gTargetSnapshot.ProcessIds,
         sizeof(gTargetSnapshot.ProcessIds));
 
-    IoMonClearQueue();
+    if (ClearQueue != FALSE) {
+        IoMonClearQueue();
+    }
     KeSetEvent(&gQueueAvailable, IO_NO_INCREMENT, FALSE);
     ExReleaseFastMutex(&gTargetUpdateMutex);
 }
@@ -810,7 +814,7 @@ IoMonDisconnect(
     )
 {
     UNREFERENCED_PARAMETER(ConnectionCookie);
-    IoMonStopTargets();
+    IoMonStopTargets(TRUE);
     FltCloseClientPort(gFilter, &gClientPort);
 }
 
@@ -914,7 +918,11 @@ IoMonMessage(
         break;
 
     case IO_MONITOR_COMMAND_STOP:
-        IoMonStopTargets();
+        IoMonStopTargets(TRUE);
+        break;
+
+    case IO_MONITOR_COMMAND_STOP_CAPTURE:
+        IoMonStopTargets(FALSE);
         break;
 
     default:
@@ -949,7 +957,7 @@ IoMonUnload(
 {
     UNREFERENCED_PARAMETER(Flags);
 
-    IoMonStopTargets();
+    IoMonStopTargets(TRUE);
 
     if (gServerPort != NULL) {
         FltCloseCommunicationPort(gServerPort);

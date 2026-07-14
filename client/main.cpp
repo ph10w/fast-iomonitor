@@ -350,6 +350,203 @@ void CloseTargets(std::vector<TargetProcess>& targets)
     }
 }
 
+bool EnsureBrokerServiceRunning(HRESULT& result)
+{
+    constexpr DWORD serviceStartTimeoutMilliseconds = 15000;
+
+    SC_HANDLE manager = OpenSCManagerW(
+        nullptr,
+        nullptr,
+        SC_MANAGER_CONNECT);
+    if (manager == nullptr) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        return false;
+    }
+
+    SC_HANDLE service = OpenServiceW(
+        manager,
+        IO_MONITOR_SERVICE_NAME,
+        SERVICE_QUERY_STATUS | SERVICE_START);
+    if (service == nullptr) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        CloseServiceHandle(manager);
+        return false;
+    }
+
+    const ULONGLONG startTick = GetTickCount64();
+    bool startObserved = false;
+    bool succeeded = false;
+
+    for (;;) {
+        SERVICE_STATUS_PROCESS status{};
+        DWORD bytesNeeded = 0;
+        if (!QueryServiceStatusEx(
+                service,
+                SC_STATUS_PROCESS_INFO,
+                reinterpret_cast<LPBYTE>(&status),
+                sizeof(status),
+                &bytesNeeded)) {
+            result = HRESULT_FROM_WIN32(GetLastError());
+            break;
+        }
+
+        if (status.dwCurrentState == SERVICE_RUNNING) {
+            result = S_OK;
+            succeeded = true;
+            break;
+        }
+
+        if (status.dwCurrentState == SERVICE_STOPPED) {
+            if (startObserved) {
+                DWORD error = status.dwWin32ExitCode;
+                if (error == ERROR_SERVICE_SPECIFIC_ERROR &&
+                    status.dwServiceSpecificExitCode != ERROR_SUCCESS) {
+                    error = status.dwServiceSpecificExitCode;
+                }
+                if (error == ERROR_SUCCESS) {
+                    error = ERROR_SERVICE_NOT_ACTIVE;
+                }
+                result = HRESULT_FROM_WIN32(error);
+                break;
+            }
+
+            if (!StartServiceW(service, 0, nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_SERVICE_ALREADY_RUNNING) {
+                    result = HRESULT_FROM_WIN32(error);
+                    break;
+                }
+            }
+            startObserved = true;
+        } else if (status.dwCurrentState == SERVICE_START_PENDING) {
+            startObserved = true;
+        } else if (status.dwCurrentState != SERVICE_STOP_PENDING) {
+            result = HRESULT_FROM_WIN32(ERROR_SERVICE_CANNOT_ACCEPT_CTRL);
+            break;
+        }
+
+        if (GetTickCount64() - startTick >= serviceStartTimeoutMilliseconds) {
+            result = HRESULT_FROM_WIN32(ERROR_SERVICE_REQUEST_TIMEOUT);
+            break;
+        }
+
+        const DWORD waitMilliseconds = std::clamp<DWORD>(
+            status.dwWaitHint / 10,
+            50,
+            500);
+        Sleep(waitMilliseconds);
+    }
+
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return succeeded;
+}
+
+bool StopBrokerService(HRESULT& result)
+{
+    constexpr DWORD serviceStopTimeoutMilliseconds = 15000;
+
+    SC_HANDLE manager = OpenSCManagerW(
+        nullptr,
+        nullptr,
+        SC_MANAGER_CONNECT);
+    if (manager == nullptr) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        return false;
+    }
+
+    SC_HANDLE service = OpenServiceW(
+        manager,
+        IO_MONITOR_SERVICE_NAME,
+        SERVICE_QUERY_STATUS | SERVICE_STOP);
+    if (service == nullptr) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        CloseServiceHandle(manager);
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD bytesNeeded = 0;
+    bool succeeded = false;
+    if (!QueryServiceStatusEx(
+            service,
+            SC_STATUS_PROCESS_INFO,
+            reinterpret_cast<LPBYTE>(&status),
+            sizeof(status),
+            &bytesNeeded)) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+    } else if (status.dwCurrentState == SERVICE_STOPPED) {
+        result = S_OK;
+        succeeded = true;
+    } else {
+        SERVICE_STATUS controlStatus{};
+        if (!ControlService(service, SERVICE_CONTROL_STOP, &controlStatus)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_SERVICE_NOT_ACTIVE) {
+                result = HRESULT_FROM_WIN32(error);
+            } else {
+                result = S_OK;
+                succeeded = true;
+            }
+        } else {
+            const ULONGLONG startTick = GetTickCount64();
+            for (;;) {
+                if (!QueryServiceStatusEx(
+                        service,
+                        SC_STATUS_PROCESS_INFO,
+                        reinterpret_cast<LPBYTE>(&status),
+                        sizeof(status),
+                        &bytesNeeded)) {
+                    result = HRESULT_FROM_WIN32(GetLastError());
+                    break;
+                }
+                if (status.dwCurrentState == SERVICE_STOPPED) {
+                    result = S_OK;
+                    succeeded = true;
+                    break;
+                }
+                if (GetTickCount64() - startTick >= serviceStopTimeoutMilliseconds) {
+                    result = HRESULT_FROM_WIN32(ERROR_SERVICE_REQUEST_TIMEOUT);
+                    break;
+                }
+
+                const DWORD waitMilliseconds = std::clamp<DWORD>(
+                    status.dwWaitHint / 10,
+                    50,
+                    500);
+                Sleep(waitMilliseconds);
+            }
+        }
+    }
+
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return succeeded;
+}
+
+class BrokerServiceStopGuard {
+public:
+    BrokerServiceStopGuard() = default;
+    BrokerServiceStopGuard(const BrokerServiceStopGuard&) = delete;
+    BrokerServiceStopGuard& operator=(const BrokerServiceStopGuard&) = delete;
+
+    ~BrokerServiceStopGuard()
+    {
+        if (active_) {
+            HRESULT ignoredResult = S_OK;
+            (void)StopBrokerService(ignoredResult);
+        }
+    }
+
+    void Dismiss()
+    {
+        active_ = false;
+    }
+
+private:
+    bool active_ = true;
+};
+
 bool RemoveExitedTargets(std::vector<TargetProcess>& targets)
 {
     bool changed = false;
@@ -592,6 +789,18 @@ int wmain(int argc, wchar_t* argv[])
         return 3;
     }
 
+    HRESULT serviceResult = S_OK;
+    if (!EnsureBrokerServiceRunning(serviceResult)) {
+        std::cerr << "Cannot start "
+                  << WideToUtf8(
+                         IO_MONITOR_SERVICE_NAME,
+                         std::wcslen(IO_MONITOR_SERVICE_NAME))
+                  << ". HRESULT " << FormatHresult(serviceResult)
+                  << ". Verify that the service is installed and that this user has start permission.\n";
+        return 4;
+    }
+    BrokerServiceStopGuard serviceStopGuard;
+
     std::vector<TargetProcess> targets;
     std::unordered_map<ULONG, std::string> processImages;
     const std::vector<DevicePathMapping> devicePathMappings =
@@ -679,7 +888,6 @@ int wmain(int argc, wchar_t* argv[])
     }
 
     HRESULT result = S_OK;
-
     IO_MONITOR_RESPONSE response{};
     if (!SendCommand(
             port,
@@ -700,6 +908,30 @@ int wmain(int argc, wchar_t* argv[])
     ULONGLONG lastDroppedEvents = 0;
     unsigned long rowsSinceFlush = 0;
     bool allTargetsExited = false;
+    bool shutdownSucceeded = true;
+
+    const auto writeResponseEvents = [&](const IO_MONITOR_RESPONSE& eventResponse) {
+        if (eventResponse.DroppedEvents != lastDroppedEvents) {
+            std::cerr << "Warning: " << eventResponse.DroppedEvents
+                      << " event(s) dropped because the kernel queue was full or allocation failed.\n";
+            lastDroppedEvents = eventResponse.DroppedEvents;
+        }
+
+        for (ULONG eventIndex = 0;
+             eventIndex < eventResponse.EventCount;
+             ++eventIndex) {
+            WriteCsvRow(
+                csv,
+                eventResponse.Events[eventIndex],
+                processImages,
+                fallbackProcessImage,
+                devicePathMappings);
+            if (++rowsSinceFlush >= 100) {
+                csv.flush();
+                rowsSinceFlush = 0;
+            }
+        }
+    };
 
     if (!processName.empty()) {
         std::wcout << L"Monitoring " << processName << L"; PIDs: "
@@ -744,25 +976,36 @@ int wmain(int argc, wchar_t* argv[])
             break;
         }
 
-        if (response.DroppedEvents != lastDroppedEvents) {
-            std::cerr << "Warning: " << response.DroppedEvents
-                      << " event(s) dropped because the kernel queue was full or allocation failed.\n";
-            lastDroppedEvents = response.DroppedEvents;
-        }
+        writeResponseEvents(response);
+    }
 
-        for (ULONG eventIndex = 0;
-             eventIndex < response.EventCount;
-             ++eventIndex) {
-            WriteCsvRow(
-                csv,
-                response.Events[eventIndex],
-                processImages,
-                fallbackProcessImage,
-                devicePathMappings);
-            if (++rowsSinceFlush >= 100) {
-                csv.flush();
-                rowsSinceFlush = 0;
+    if (!SendCommand(
+            port,
+            IO_MONITOR_COMMAND_STOP_CAPTURE,
+            {},
+            0,
+            0,
+            response,
+            result)) {
+        std::cerr << "Could not stop event capture before draining the queue. HRESULT "
+                  << FormatHresult(result) << ".\n";
+        shutdownSucceeded = false;
+    } else {
+        while (response.QueueDepth != 0) {
+            if (!SendCommand(
+                    port,
+                    IO_MONITOR_COMMAND_GET_EVENTS,
+                    {},
+                    0,
+                    0,
+                    response,
+                    result)) {
+                std::cerr << "Could not drain the remaining event queue. HRESULT "
+                          << FormatHresult(result) << ".\n";
+                shutdownSucceeded = false;
+                break;
             }
+            writeResponseEvents(response);
         }
     }
 
@@ -778,9 +1021,21 @@ int wmain(int argc, wchar_t* argv[])
         ignoredResult);
 
     csv.flush();
+    if (!csv) {
+        std::cerr << "Could not finish writing the CSV output.\n";
+        shutdownSucceeded = false;
+    }
     CloseHandle(port);
     CloseTargets(targets);
     SetConsoleCtrlHandler(ConsoleControlHandler, FALSE);
+
+    HRESULT serviceStopResult = S_OK;
+    if (!StopBrokerService(serviceStopResult)) {
+        std::cerr << "Could not stop IoMonitorService. HRESULT "
+                  << FormatHresult(serviceStopResult) << ".\n";
+        shutdownSucceeded = false;
+    }
+    serviceStopGuard.Dismiss();
 
     if (allTargetsExited) {
         std::wcout << L"All target processes exited. CSV written to "
@@ -788,5 +1043,5 @@ int wmain(int argc, wchar_t* argv[])
     } else {
         std::wcout << L"Stopped. CSV written to " << outputPath.c_str() << L".\n";
     }
-    return 0;
+    return shutdownSucceeded ? 0 : 6;
 }

@@ -172,6 +172,7 @@ DWORD ValidateCommand(HANDLE pipe, const IO_MONITOR_COMMAND& command)
     case IO_MONITOR_COMMAND_GET_EVENTS:
     case IO_MONITOR_COMMAND_GET_STATUS:
     case IO_MONITOR_COMMAND_STOP:
+    case IO_MONITOR_COMMAND_STOP_CAPTURE:
         return command.TargetProcessCount == 0 && command.OperationMask == 0
             ? ERROR_SUCCESS
             : ERROR_INVALID_PARAMETER;

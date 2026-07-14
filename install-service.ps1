@@ -21,6 +21,126 @@ $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
 $fltmc = Join-Path $env:SystemRoot 'System32\fltmc.exe'
 $pnputil = Join-Path $env:SystemRoot 'System32\pnputil.exe'
 $installDriverRequested = $InstallDriver -or $LoadDriver
+$serviceControlAccessMask = 0x00000034 # QUERY_STATUS | START | STOP
+
+function Get-IoMonitorServiceSecurityDescriptor {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    $output = @(& $sc sdshow $Name 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "SC could not read the security descriptor for $Name (exit code $exitCode): $($output -join ' ')"
+    }
+
+    $sddl = ($output |
+        ForEach-Object { $_.ToString().Trim() } |
+        Where-Object { $_ -match '^(?:O:|G:|D:|S:)' }) -join ''
+    if ([string]::IsNullOrWhiteSpace($sddl)) {
+        throw "SC returned no security descriptor for $Name."
+    }
+
+    try {
+        [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    } catch {
+        throw "SC returned an invalid security descriptor for ${Name}: $($_.Exception.Message)"
+    }
+}
+
+function Test-IoMonitorServiceAccess {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Descriptor,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$UserSid,
+
+        [Parameter(Mandatory)]
+        [int]$RequiredAccessMask
+    )
+
+    if ($null -eq $Descriptor.DiscretionaryAcl) {
+        return $false
+    }
+
+    foreach ($ace in $Descriptor.DiscretionaryAcl) {
+        if ($ace -is [Security.AccessControl.CommonAce] -and
+            $ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+            $ace.SecurityIdentifier -eq $UserSid -and
+            ($ace.AccessMask -band $RequiredAccessMask) -eq $RequiredAccessMask) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Grant-IoMonitorServiceControl {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [Security.Principal.SecurityIdentifier]$UserSid
+    )
+
+    try {
+        $accountName = $UserSid.Translate(
+            [Security.Principal.NTAccount]).Value
+        $accountDisplay = $accountName
+    } catch [Security.Principal.IdentityNotMappedException] {
+        $accountDisplay = $UserSid.ToString()
+    }
+
+    $descriptor = Get-IoMonitorServiceSecurityDescriptor -Name $Name
+    if (Test-IoMonitorServiceAccess `
+            -Descriptor $descriptor `
+            -UserSid $UserSid `
+            -RequiredAccessMask $serviceControlAccessMask) {
+        Write-Host "Service start, stop, and status rights are already granted to $accountDisplay."
+        return
+    }
+
+    if ($null -eq $descriptor.DiscretionaryAcl) {
+        throw "Refusing to replace the null DACL on $Name."
+    }
+
+    $newAce = [Security.AccessControl.CommonAce]::new(
+        [Security.AccessControl.AceFlags]::None,
+        [Security.AccessControl.AceQualifier]::AccessAllowed,
+        $serviceControlAccessMask,
+        $UserSid,
+        $false,
+        [byte[]]$null)
+
+    $insertIndex = $descriptor.DiscretionaryAcl.Count
+    for ($index = 0; $index -lt $descriptor.DiscretionaryAcl.Count; ++$index) {
+        if (($descriptor.DiscretionaryAcl[$index].AceFlags -band
+                [Security.AccessControl.AceFlags]::Inherited) -ne 0) {
+            $insertIndex = $index
+            break
+        }
+    }
+    $descriptor.DiscretionaryAcl.InsertAce($insertIndex, $newAce)
+
+    $updatedSddl = $descriptor.GetSddlForm(
+        [Security.AccessControl.AccessControlSections]::All)
+    Write-Host "Granting service start, stop, and status rights to $accountDisplay."
+    & $sc sdset $Name $updatedSddl
+    if ($LASTEXITCODE -ne 0) {
+        throw "SC could not update the security descriptor for $Name (exit code $LASTEXITCODE)."
+    }
+
+    $verifiedDescriptor = Get-IoMonitorServiceSecurityDescriptor -Name $Name
+    if (-not (Test-IoMonitorServiceAccess `
+            -Descriptor $verifiedDescriptor `
+            -UserSid $UserSid `
+            -RequiredAccessMask $serviceControlAccessMask)) {
+        throw "SC did not persist the requested service rights for $UserSid on $Name."
+    }
+}
 
 function Get-IoMonitorPublishedInfNames {
     $windowsInfDirectory = Join-Path $env:SystemRoot 'INF'
@@ -346,14 +466,14 @@ if ($null -eq $existingService) {
         -BinaryPathName "`"$installedBinary`"" `
         -DisplayName $displayName `
         -Description 'Privileged broker for Fast IoMonitor.' `
-        -StartupType Automatic `
+        -StartupType Manual `
         -DependsOn 'IoMonitor' | Out-Null
 } else {
     Write-Host "Updating $serviceName."
     $quotedInstalledBinary = '"' + $installedBinary + '"'
     & $sc config $serviceName `
         'binPath=' $quotedInstalledBinary `
-        'start=' 'auto' `
+        'start=' 'demand' `
         'depend=' 'IoMonitor' `
         'DisplayName=' $displayName
     if ($LASTEXITCODE -ne 0) {
@@ -365,12 +485,10 @@ if ($null -eq $existingService) {
     }
 }
 
-Write-Host "Starting $serviceName."
-Start-Service -Name $serviceName
-(Get-Service -Name $serviceName).WaitForStatus(
-    'Running',
-    [TimeSpan]::FromSeconds(15))
+Grant-IoMonitorServiceControl -Name $serviceName -UserSid $identity.User
+
 & $sc query $serviceName
 if ($LASTEXITCODE -ne 0) {
     throw "SC could not verify $serviceName (exit code $LASTEXITCODE)."
 }
+Write-Host "$serviceName is installed and will be started by IoMonitorClient when required."

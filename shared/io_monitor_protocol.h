@@ -3,7 +3,7 @@
 // Shared wire format for the kernel minifilter and the user-mode logger.
 // Both projects are intentionally x64-only in this MVP.
 
-#define IO_MONITOR_PROTOCOL_VERSION 4UL
+#define IO_MONITOR_PROTOCOL_VERSION 5UL
 #define IO_MONITOR_PORT_NAME L"\\IoMonitorPort"
 #define IO_MONITOR_SERVICE_NAME L"IoMonitorService"
 #define IO_MONITOR_PIPE_NAME L"\\\\.\\pipe\\IoMonitorService"
@@ -15,6 +15,7 @@
 #define IO_MONITOR_COMMAND_GET_EVENTS 2UL
 #define IO_MONITOR_COMMAND_GET_STATUS 3UL
 #define IO_MONITOR_COMMAND_STOP       4UL
+#define IO_MONITOR_COMMAND_STOP_CAPTURE 5UL
 
 #define IO_MONITOR_OPERATION_READ  1UL
 #define IO_MONITOR_OPERATION_WRITE 2UL
