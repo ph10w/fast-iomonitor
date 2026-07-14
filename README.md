@@ -65,14 +65,12 @@ Der vollständige Build wird in einer normalen PowerShell im Projektverzeichnis 
 genau diesem Aufruf gestartet:
 
 ```powershell
-pwsh.exe -NoProfile -File .\build.ps1
+pwsh.exe -File .\build.ps1
 ```
 
 Bedeutung des Aufrufs und seiner Parameter:
 
 - `pwsh.exe` startet PowerShell 7.
-- `-NoProfile` verhindert das Laden persönlicher PowerShell-Profile. Der Parameter
-  ist optional, macht den Ablauf aber reproduzierbarer.
 - `-File .\build.ps1` führt das Buildskript aus dem aktuellen Verzeichnis aus.
 - `-Configuration <Debug|Release>` wählt optional die Buildkonfiguration. Ohne den
   Parameter wird `Release` gebaut.
@@ -121,15 +119,15 @@ Nach dem Build werden Treiber und Broker-Dienst gemeinsam aus einer
 administrativen PowerShell installiert und gestartet:
 
 ```powershell
-sudo pwsh.exe -NoProfile -File .\install-service.ps1 -LoadDriver
+sudo pwsh.exe -File .\install-service.ps1 -LoadDriver
 ```
 
 Bedeutung des Aufrufs und der Parameter:
 
 - `sudo` erhöht ausschließlich das Installationsskript. Der spätere
   `IoMonitorClient.exe` läuft ohne Erhöhung.
-- `pwsh.exe -NoProfile -File .\install-service.ps1` führt die reproduzierbare
-  Treiber- und Dienstinstallation aus.
+- `pwsh.exe -File .\install-service.ps1` führt die Treiber- und
+  Dienstinstallation aus.
 - `-Configuration <Debug|Release>` wählt optional Treiberpaket und Dienstdatei.
   Ohne den Parameter wird `bin\x64\Release` verwendet.
 - `-LoadDriver` installiert das Treiberpaket und lädt den Minifilter. Ist er bereits
@@ -218,7 +216,7 @@ Die CSV enthält genau diese Spalten:
 Zuerst den Client beenden und danach diesen Aufruf ausführen:
 
 ```powershell
-sudo pwsh.exe -NoProfile -File .\install-service.ps1 -Uninstall
+sudo pwsh.exe -File .\install-service.ps1 -Uninstall
 ```
 
 Das Skript erledigt den vollständigen Ablauf automatisch: Broker stoppen und

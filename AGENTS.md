@@ -82,13 +82,13 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
 - Vollständiger Build aus einer normalen PowerShell:
 
   ```powershell
-  pwsh.exe -NoProfile -File .\build.ps1
+  pwsh.exe -File .\build.ps1
   ```
 
 - Nur den Client bauen:
 
   ```powershell
-  pwsh.exe -NoProfile -File .\build.ps1 -ClientOnly
+  pwsh.exe -File .\build.ps1 -ClientOnly
   ```
 
 - Der vollständige Build benötigt Visual Studio 2022, Windows SDK und WDK. Er
@@ -102,8 +102,8 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
 - Unterstützte Administratoraufrufe:
 
   ```powershell
-  sudo pwsh.exe -NoProfile -File .\install-service.ps1 -LoadDriver
-  sudo pwsh.exe -NoProfile -File .\install-service.ps1 -Uninstall
+  sudo pwsh.exe -File .\install-service.ps1 -LoadDriver
+  sudo pwsh.exe -File .\install-service.ps1 -Uninstall
   ```
 
 - Nach Treiber- oder Protokolländerungen mindestens einen vollständigen
