@@ -1,263 +1,261 @@
 # Fast IoMonitor
 
-Fast IoMonitor protokolliert Datei-Lese- und -Schreibzugriffe ausgewählter Prozesse
-unter Windows in eine UTF-8-CSV. Ein privilegierter Dienst kommuniziert mit dem
-Minifilter; der Client läuft ohne Administratorrechte.
+Fast IoMonitor logs file read and write operations performed by selected processes
+on Windows to a UTF-8 CSV file. A privileged service communicates with the
+minifilter; the client runs without administrator privileges.
 
-> **Wichtig:** Dies ist ein Lern- und Test-MVP für eine isolierte Test-VM, kein
-> produktionsreifer Treiber. Ein Fehler in Kernel-Code kann Windows zum Absturz
-> bringen. Für eine Verteilung sind unter anderem ein zugewiesener Minifilter-
-> Altitude-Wert, Produktionssignierung, Lasttests und eine Sicherheitsprüfung nötig.
+> **Important:** This is a learning and testing MVP for an isolated test VM, not
+> a production-ready driver. A bug in kernel code can crash Windows. Distribution
+> requires, among other things, an assigned minifilter altitude, production
+> signing, load testing, and a security review.
 
-## Aufbau
+## Architecture
 
 ```text
-Zielprozesse
+Target processes
   -> IRP_MJ_READ / IRP_MJ_WRITE
-  -> IoMonitor.sys (Handle-Pfadcache und Post-Operation-Status)
-  -> begrenzte Nonpaged-Queue (1024 Ereignisse)
-  -> Batches mit bis zu 32 Ereignissen
+  -> IoMonitor.sys (per-handle path cache and post-operation status)
+  -> bounded nonpaged queue (1,024 events)
+  -> batches of up to 32 events
   -> IoMonitorService.exe (LocalSystem)
-  -> abgesicherte lokale Named Pipe
+  -> secured local named pipe
   -> IoMonitorClient.exe
-  -> UTF-8-CSV
+  -> UTF-8 CSV
 ```
 
-Der Treiber blockiert keine Dateioperation und verändert weder Daten noch Status.
-Ziel-PID und gewählte Operation werden im Pre-Operation-Callback geprüft, bevor
-Speicher reserviert oder der Dateiname aufgelöst wird. Normalisierte Pfade werden
-nach der ersten erfolgreichen Abfrage pro Stream-Handle im Treiber
-zwischengespeichert. Ist die Queue voll oder schlägt eine
-Nonpaged-Pool-Allokation fehl, verwirft der Treiber das Ereignis und erhöht
-`DroppedEvents`. Der Client meldet diese Verluste auf `stderr`.
+The driver does not block file operations or modify their data or status. The
+target PID and selected operation are checked in the pre-operation callback
+before memory is allocated or the file name is resolved. Normalized paths are
+cached in the driver per stream handle after the first successful lookup. If the
+queue is full or a nonpaged-pool allocation fails, the driver discards the event
+and increments `DroppedEvents`. The client reports these losses on `stderr`.
 
-Verzeichnisse:
+Directories and files:
 
-- `driver/`: Minifilter, INF und WDK-Projekt
-- `client/`: C++-Konsolenlogger
-- `service/`: privilegierter Windows-Dienst und Named-Pipe-Broker
-- `shared/`: festes Nachrichtenformat zwischen Kernel und User Mode
-- `FastIoMonitor.sln`: Visual-Studio-Lösung für x64 Debug/Release
-- `build.ps1`: Build-Helfer; `-ClientOnly` funktioniert ohne WDK
-- `install-service.ps1`: installiert optional den Treiber und installiert oder
-  entfernt `IoMonitorService`
+- `driver/`: minifilter, INF, and WDK project
+- `client/`: C++ console logger
+- `service/`: privileged Windows service and named-pipe broker
+- `shared/`: fixed message format shared by kernel and user mode
+- `FastIoMonitor.sln`: Visual Studio solution for x64 Debug/Release
+- `build.ps1`: build helper; `-ClientOnly` works without the WDK
+- `install-service.ps1`: optionally installs the driver and installs or removes
+  `IoMonitorService`
 
-Die internen Laufzeitkennungen und Binärnamen beginnen aus Kompatibilitätsgründen
-weiterhin mit `IoMonitor`. So aktualisiert die umbenannte Version eine vorhandene
-Installation, statt einen zweiten Treiber und Dienst parallel anzulegen.
+The internal runtime identifiers and binary names continue to begin with
+`IoMonitor` for compatibility. This allows the renamed version to update an
+existing installation instead of creating a second driver and service alongside
+it.
 
-## Voraussetzungen
+## Prerequisites
 
-- Windows 10 ab Version 2004 (Build 19041) oder Windows 11 x64
-- Visual Studio mit **Desktop development with C++**
-- zum Treiberbau zusätzlich das zur SDK-/VS-Version passende **Windows Driver Kit
-  (WDK)** mit Visual-Studio-Integration
-- administrative Rechte zum Installieren und Laden des Minifilters sowie zum
-  Installieren des Windows-Dienstes; der Aufzeichnungsclient benötigt sie nicht
-- für den Release-Treiber eine entsprechend konfigurierte Testsignierungsumgebung
+- Windows 10 version 2004 (build 19041) or later, or Windows 11 x64
+- Visual Studio with **Desktop development with C++**
+- for driver builds, the **Windows Driver Kit (WDK)** matching the SDK/Visual
+  Studio version, including Visual Studio integration
+- administrator privileges to install and load the minifilter and install the
+  Windows service; the logging client does not require them
+- an appropriately configured test-signing environment for the Release driver
 
-Das WDK stellt `fltKernel.h`, `FltMgr.lib`, INF-Prüfung und Treibersignierung bereit.
-Der normale Windows SDK reicht nur für den User-Mode-Client.
+The WDK provides `fltKernel.h`, `FltMgr.lib`, INF validation, and driver signing.
+The standard Windows SDK is sufficient only for the user-mode client.
 
-## Bauen
+## Build
 
-Der vollständige Build wird in einer normalen PowerShell im Projektverzeichnis mit
-genau diesem Aufruf gestartet:
+Run the full build from a regular PowerShell session in the project directory
+with this command:
 
 ```powershell
 pwsh.exe -File .\build.ps1
 ```
 
-Bedeutung des Aufrufs und seiner Parameter:
+Command and parameter details:
 
-- `pwsh.exe` startet PowerShell 7.
-- `-File .\build.ps1` führt das Buildskript aus dem aktuellen Verzeichnis aus.
-- `-Configuration <Debug|Release>` wählt optional die Buildkonfiguration. Ohne den
-  Parameter wird `Release` gebaut.
-- `-ClientOnly` baut ausschließlich `IoMonitorClient.exe` und benötigt deshalb
-  kein WDK.
-- `-VisualStudio 2022` verwendet Visual Studio 2022. Alternativ wählt
-  `-VisualStudio Latest` die neueste gefundene Visual-Studio-Installation; der
-  Standardwert ist `2022`.
+- `pwsh.exe` starts PowerShell 7.
+- `-File .\build.ps1` runs the build script from the current directory.
+- `-Configuration <Debug|Release>` optionally selects the build configuration.
+  The default is `Release`.
+- `-ClientOnly` builds only `IoMonitorClient.exe` and therefore does not require
+  the WDK.
+- `-VisualStudio 2022` uses Visual Studio 2022. Alternatively,
+  `-VisualStudio Latest` selects the newest Visual Studio installation found;
+  the default is `2022`.
 
-Die Ergebnisse landen in `bin\x64\Debug` beziehungsweise `bin\x64\Release`.
-Neben Treiber und Client erzeugt der vollständige Build dort auch
-`IoMonitorService.exe`. `build.ps1` verändert weder Dienste noch Zertifikatspeicher
-und benötigt deshalb keine Administratorrechte.
+Build outputs are written to `bin\x64\Debug` or `bin\x64\Release`. In addition to
+the driver and client, a full build also produces `IoMonitorService.exe` there.
+`build.ps1` does not modify services or certificate stores and therefore does not
+require administrator privileges.
 
-## Testsignierung
+## Test signing
 
-64-Bit-Windows lädt keinen unsignierten Kernel-Treiber. Der genaue Ablauf hängt
-von der lokalen WDK-/Zertifikatskonfiguration ab. Für eine wegwerfbare Test-VM kann
-der von Visual Studio test-signierte Release-Treiber mit aktiviertem Windows-
-Testmodus verwendet werden. Das Aktivieren des Testmodus verändert die
-Boot-Sicherheitskonfiguration und erfordert einen Neustart; bei aktivem Secure Boot
-kann es abgewiesen werden.
+64-bit Windows does not load unsigned kernel drivers. The exact procedure depends
+on the local WDK and certificate configuration. In a disposable test VM, the
+Release driver test-signed by Visual Studio can be used with Windows test mode
+enabled. Enabling test mode changes the boot security configuration and requires
+a restart; it may be rejected while Secure Boot is enabled.
 
-Nicht auf einem Produktivsystem ausführen. Die Aktivierung erfolgt in einer
-administrativen Konsole typischerweise mit:
+Do not do this on a production system. Test mode is typically enabled from an
+administrative console with:
 
 ```powershell
 bcdedit /set testsigning on
 ```
 
-Nach dem Test kann der Modus wieder deaktiviert werden:
+After testing, it can be disabled again with:
 
 ```powershell
 bcdedit /set testsigning off
 ```
 
-Beide Änderungen werden erst nach einem Neustart wirksam.
+Both changes take effect only after a restart.
 
-Die INF verwendet `SERVICE_DEMAND_START`; der Treiber startet also nicht automatisch
-mit Windows. Für Windows 10 und Windows 11 vor 24H2 trägt sie die Instanzwerte unter
-`Instances` ein; für Windows 11 ab 24H2 zusätzlich unter `Parameters\Instances`.
+The INF uses `SERVICE_DEMAND_START`, so the driver does not start automatically
+with Windows. It writes instance values under `Instances` on Windows 10 and
+versions of Windows 11 before 24H2, and additionally under
+`Parameters\Instances` on Windows 11 version 24H2 and later.
 
-## Treiber und Dienst installieren
+## Install the driver and service
 
-Nach dem Build werden Treiber und Broker-Dienst gemeinsam aus einer
-administrativen PowerShell installiert und gestartet:
+After building, install and start the driver and broker service together from an
+administrative PowerShell session:
 
 ```powershell
 sudo pwsh.exe -File .\install-service.ps1 -LoadDriver
 ```
 
-Bedeutung des Aufrufs und der Parameter:
+Command and parameter details:
 
-- `sudo` erhöht ausschließlich das Installationsskript. Der spätere
-  `IoMonitorClient.exe` läuft ohne Erhöhung.
-- `pwsh.exe -File .\install-service.ps1` führt die Treiber- und
-  Dienstinstallation aus.
-- `-Configuration <Debug|Release>` wählt optional Treiberpaket und Dienstdatei.
-  Ohne den Parameter wird `bin\x64\Release` verwendet.
-- `-LoadDriver` installiert das Treiberpaket und lädt den Minifilter. Ist er bereits
-  geladen, wird er nach dem Stoppen des Brokers entladen und neu geladen.
-  `-LoadDriver` schließt `-InstallDriver` ein.
-- `-InstallDriver` installiert das Treiberpaket, erzwingt aber keinen Reload eines
-  bereits laufenden Minifilters. Ist er noch nicht geladen, wird er beim Start des
-  abhängigen Broker-Dienstes geladen.
-- Ohne `-InstallDriver` oder `-LoadDriver` wird ausschließlich der Broker installiert
-  beziehungsweise aktualisiert; der Treiber muss dann bereits registriert sein.
-- `-Uninstall` stoppt und entfernt den Broker, entlädt den Minifilter und löscht
-  alle eindeutig als IoMonitor erkannten OEM-Treiberpakete aus dem Driver Store.
-  Das möglicherweise mit anderen Testtreibern gemeinsam verwendete
-  WDK-Testzertifikat bleibt bestehen. Dieser Parameter darf nicht mit den
-  Treiberparametern kombiniert werden.
+- `sudo` elevates only the installation script. The subsequently launched
+  `IoMonitorClient.exe` runs without elevation.
+- `pwsh.exe -File .\install-service.ps1` performs the driver and service
+  installation.
+- `-Configuration <Debug|Release>` optionally selects the driver package and
+  service binary. The default is `bin\x64\Release`.
+- `-LoadDriver` installs the driver package and loads the minifilter. If it is
+  already loaded, the script stops the broker, unloads the minifilter, and loads
+  it again. `-LoadDriver` includes `-InstallDriver`.
+- `-InstallDriver` installs the driver package but does not force an already
+  running minifilter to reload. If it is not loaded yet, it is loaded when the
+  dependent broker service starts.
+- Without `-InstallDriver` or `-LoadDriver`, only the broker is installed or
+  updated; the driver must already be registered.
+- `-Uninstall` stops and removes the broker, unloads the minifilter, and deletes
+  all OEM driver packages unambiguously identified as IoMonitor from the Driver
+  Store. The WDK test certificate, which may be shared with other test drivers,
+  is retained. This parameter cannot be combined with the driver parameters.
 
-Beim Installieren des Treibers prüft das Skript das WDK-Testzertifikat und
-importiert es bei Bedarf in `LocalMachine\Root` und
-`LocalMachine\TrustedPublisher`. Dies darf ausschließlich auf einem Testsystem
-geschehen. Der zuletzt importierte Thumbprint wird in
-`.iomonitor-cert-state.json` festgehalten. Wechselt das WDK-Zertifikat, entfernt
-das Skript nur das zuvor für IoMonitor vermerkte Zertifikat; andere
-WDK-Zertifikate bleiben unangetastet.
+When installing the driver, the script checks the WDK test certificate and, if
+necessary, imports it into `LocalMachine\Root` and
+`LocalMachine\TrustedPublisher`. This must be done only on a test system. The
+thumbprint most recently imported is recorded in `.iomonitor-cert-state.json`.
+If the WDK certificate changes, the script removes only the previous certificate
+recorded for IoMonitor; other WDK certificates remain untouched.
 
-Das Skript kopiert den Dienst nach `%ProgramFiles%\IoMonitor`, registriert ihn als
-automatisch gestarteten `LocalSystem`-Dienst und trägt den Minifilter `IoMonitor`
-als Abhängigkeit ein. Bei einem Neustart lässt der Service Control Manager deshalb
-zuerst den Minifilter und anschließend den Broker starten.
+The script copies the service to `%ProgramFiles%\IoMonitor`, registers it as an
+automatically started `LocalSystem` service, and adds the `IoMonitor` minifilter
+as a dependency. On restart, the Service Control Manager therefore starts the
+minifilter first and the broker afterward.
 
-Normale Benutzer erhalten bewusst keine Rechte zum Starten oder Stoppen des
-Dienstes. Das ist für die Aufzeichnung nicht erforderlich, weil der Dienst
-automatisch läuft. Seine Named Pipe akzeptiert ausschließlich lokale,
-authentifizierte Benutzer. Vor dem Setzen der Ziel-PIDs prüft der Dienst außerdem,
-dass alle Zielprozesse demselben Windows-Benutzer wie der verbundene Client
-gehören.
+Standard users are intentionally not granted permission to start or stop the
+service. This is not required for logging because the service runs automatically.
+Its named pipe accepts only local, authenticated users. Before setting the target
+PIDs, the service also verifies that every target process belongs to the same
+Windows user as the connected client.
 
-## Aufzeichnen
+## Record file operations
 
-Alle aktuell laufenden Prozesse mit einem EXE-Namen werden mit diesem Aufruf ohne
-Administratorrechte überwacht:
+Monitor all currently running processes with a given executable name without
+administrator privileges using this command:
 
 ```powershell
 .\bin\x64\Release\IoMonitorClient.exe --process-name notepad.exe --operation Read --output .\io_access.csv
 ```
 
-Bedeutung des Aufrufs und der verfügbaren Parameter:
+Command and parameter details:
 
-- `.\bin\x64\Release\IoMonitorClient.exe` startet den zuvor gebauten
-  Release-Client.
-- `--process-name notepad.exe` ermittelt alle laufenden Prozesse mit diesem
-  Basisnamen. Ist beim Start noch kein passender Prozess vorhanden, wartet der
-  Client auf den ersten Treffer. Der Vergleich ignoriert Groß- und Kleinschreibung;
-  `.exe` darf weggelassen werden.
-- `--operation Read` lässt bereits der Minifilter ausschließlich Lesezugriffe
-  erfassen. Zulässig sind `Read`, `Write` und `All`; Groß- und Kleinschreibung
-  werden ignoriert. Ohne den Parameter gilt `All`.
-- `--output .\io_access.csv` bestimmt die Ausgabedatei. Ohne diesen Parameter wird
-  `io_access.csv` im aktuellen Verzeichnis verwendet.
-- `--append` ergänzt eine vorhandene CSV. Ohne diesen Parameter wird die Datei beim
-  Start neu erstellt beziehungsweise überschrieben.
-- `--pid <PID>` überwacht alternativ genau eine explizite PID und darf nicht mit
-  `--process-name` kombiniert werden.
-- `--help` oder `-h` zeigt die Kommandozeilenhilfe an.
+- `.\bin\x64\Release\IoMonitorClient.exe` starts the previously built Release
+  client.
+- `--process-name notepad.exe` finds all running processes with this base name.
+  If no matching process exists at startup, the client waits for the first match.
+  Matching is case-insensitive, and the `.exe` suffix may be omitted.
+- `--operation Read` instructs the minifilter to capture only read operations.
+  Valid values are `Read`, `Write`, and `All`; matching is case-insensitive. The
+  default is `All`.
+- `--output .\io_access.csv` selects the output file. The default is
+  `io_access.csv` in the current directory.
+- `--append` appends to an existing CSV file. Without this parameter, the file is
+  created or overwritten at startup.
+- `--pid <PID>` alternatively monitors exactly one explicit PID and cannot be
+  combined with `--process-name`.
+- `--help` or `-h` displays command-line help.
 
-Es kann immer nur ein Client mit dem Broker verbunden sein. Pro Client sind maximal
-64 eindeutige PIDs desselben Windows-Benutzers aktiv. Mit `Strg+C` wird auch die
-anfängliche Wartephase oder die laufende Aufzeichnung beendet. Nach dem ersten
-Treffer stoppt der Client ebenfalls, wenn alle erkannten Zielprozesse beendet
-wurden und er Synchronisationshandles auf sie öffnen konnte. Beendete Prozesse
-werden aus der aktiven PID-Liste entfernt.
+Only one client can be connected to the broker at a time. Each client can have up
+to 64 unique PIDs belonging to the same Windows user active at once. `Ctrl+C`
+ends both the initial waiting period and active logging. After the first match,
+the client also stops when all detected target processes have exited and it was
+able to open synchronization handles for them. Exited processes are removed from
+the active PID list.
 
-## CSV-Felder
+## CSV fields
 
-Die CSV enthält genau diese Spalten:
+The CSV contains exactly these columns:
 
-- UTC-Zeitpunkt mit 100-ns-Auflösung aus der Windows-Systemzeit
-- vom Client ermittelter Prozesspfad
-- `Read` oder `Write`
-- Erfolgsfeld (`1` oder `0`)
-- normalisierten Dateipfad. Bekannte NT-Gerätepräfixe werden im Client über eine
-  beim Start gecachte Zuordnung in Laufwerkspfade wie `C:\Users\...` umgewandelt;
-  unbekannte NT-Pfade bleiben unverändert
+- UTC timestamp with 100 ns resolution from Windows system time
+- process path determined by the client
+- `Read` or `Write`
+- success field (`1` or `0`)
+- normalized file path. Known NT device prefixes are converted by the client to
+  drive paths such as `C:\Users\...` using a mapping cached at startup; unknown NT
+  paths remain unchanged
 
-## Beenden und entfernen
+## Stop and uninstall
 
-Zuerst den Client beenden und danach diesen Aufruf ausführen:
+Stop the client first, then run:
 
 ```powershell
 sudo pwsh.exe -File .\install-service.ps1 -Uninstall
 ```
 
-Das Skript erledigt den vollständigen Ablauf automatisch: Broker stoppen und
-löschen, Minifilter entladen, das IoMonitor-OEM-Paket über mehrere
-projektspezifische INF-Merkmale identifizieren und mit
-`pnputil /delete-driver ... /uninstall` entfernen. Andere Treiber derselben Klasse
-`ActivityMonitor` werden nicht anhand der Klasse allein ausgewählt.
+The script handles the full procedure automatically: it stops and deletes the
+broker, unloads the minifilter, identifies the IoMonitor OEM package by multiple
+project-specific INF attributes, and removes it with
+`pnputil /delete-driver ... /uninstall`. Other drivers in the same
+`ActivityMonitor` class are not selected based on the class alone.
 
-Das WDK-Testzertifikat wird bewusst nicht automatisch entfernt, weil dasselbe
-Zertifikat auch andere lokal gebaute Testtreiber signieren kann.
+The WDK test certificate is intentionally not removed automatically because the
+same certificate may also sign other locally built test drivers.
 
-## Bewusste Grenzen des MVP
+## Known MVP limitations
 
-- Der Client wartet bei Bedarf auf den ersten Prozess mit dem angegebenen EXE-Namen
-  und übernimmt dann alle zu diesem Zeitpunkt gefundenen PIDs. Noch später gestartete
-  gleichnamige Prozesse werden nicht automatisch ergänzt; Unterprozesse mit anderem
-  Namen ebenfalls nicht.
-- Bei PID-Wiederverwendung könnte ohne gültigen Prozesshandle kurz ein falscher
-  Prozess erfasst werden. Der Broker prüft Benutzer und PID erneut, kann aber eine
-  Wiederverwendung nach dieser Prüfung ebenfalls nicht vollständig ausschließen.
-- Paging-I/O besitzt nicht immer einen anfordernden Thread. In diesem Fall liefert
-  Windows PID 0; solche Ereignisse lassen sich nicht zuverlässig der Ziel-PID
-  zuordnen und werden nicht protokolliert.
-- Memory-Mapped-I/O und Lazy-Writer-Aktivität entsprechen daher nicht zwingend einem
-  direkten logischen Zugriff des Zielprozesses.
-- Die Namensauflösung darf in bestimmten I/O-Kontexten scheitern. Solche Ereignisse
-  werden bereits im Minifilter verworfen und gelangen nicht in die CSV.
-- Pfade sind im Protokoll auf 511 UTF-16-Zeichen begrenzt und werden gegebenenfalls
-  markiert abgeschnitten.
-- Der Pfadcache wird bei einer Umbenennung über dasselbe Stream-Handle verworfen.
-  Erfolgt die Umbenennung gleichzeitig über ein anderes Handle, kann ein bereits
-  gecachter Pfad bis zum Schließen des ursprünglichen Handles veraltet sein.
-- Ein Absturz oder eine langsame CSV-Platte verliert höchstens Ereignisse; der
-  Zielprozess wird bewusst nicht zurückgestaut.
-- Der INF-Altitude `385201` ist ausschließlich ein Testwert. Microsoft muss vor
-  einer Verteilung einen Altitude-Wert passend zur Load-Order-Gruppe zuweisen.
+- If necessary, the client waits for the first process with the specified
+  executable name and then includes all matching PIDs found at that time. Matching
+  processes started later are not added automatically, nor are child processes
+  with a different name.
+- If a PID is reused, the wrong process could briefly be captured when no valid
+  process handle is available. The broker rechecks the user and PID but cannot
+  completely rule out reuse after that check either.
+- Paging I/O does not always have a requesting thread. In this case Windows
+  reports PID 0; such events cannot be reliably associated with the target PID
+  and are not logged.
+- Memory-mapped I/O and lazy-writer activity therefore do not necessarily
+  correspond to a direct logical access by the target process.
+- Name resolution can fail in certain I/O contexts. The minifilter discards such
+  events before they reach the CSV.
+- Protocol paths are limited to 511 UTF-16 characters and are truncated with a
+  marker when necessary.
+- The path cache is invalidated when a rename occurs through the same stream
+  handle. If a concurrent rename uses a different handle, an already cached path
+  may remain stale until the original handle is closed.
+- A crash or slow CSV disk can lose events; the target process is intentionally
+  never subjected to backpressure.
+- The INF altitude `385201` is a test value only. Before distribution, Microsoft
+  must assign an altitude appropriate for the load-order group.
 
-## Nächste Schritte für eine robuste Version
+## Next steps toward a robust release
 
-- Prozessidentität zusätzlich über Erstellungszeit oder Kernel-Prozessobjekt absichern
-- Konfigurierbare Queue- und Batchgrößen sowie Laufzeitmetriken ergänzen
-- Mehrere gleichzeitige Clients, Logrotation und belastbare Shutdown-Semantik ergänzen
-- Driver Verifier, Static Driver Verifier, CodeQL und Lasttests in einer VM ausführen
-- Produktionszertifikat, zugewiesenen Altitude und HLK-/Kompatibilitätstests einplanen
+- additionally validate process identity using creation time or the kernel
+  process object
+- add configurable queue and batch sizes and runtime metrics
+- add multiple concurrent clients, log rotation, and robust shutdown semantics
+- run Driver Verifier, Static Driver Verifier, CodeQL, and load tests in a VM
+- plan for a production certificate, assigned altitude, and HLK/compatibility
+  testing
