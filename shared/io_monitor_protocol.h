@@ -3,7 +3,7 @@
 // Shared wire format for the kernel minifilter and the user-mode logger.
 // Both projects are intentionally x64-only in this MVP.
 
-#define IO_MONITOR_PROTOCOL_VERSION 6UL
+#define IO_MONITOR_PROTOCOL_VERSION 7UL
 #define IO_MONITOR_PORT_NAME L"\\IoMonitorPort"
 #define IO_MONITOR_SERVICE_NAME L"IoMonitorService"
 #define IO_MONITOR_PIPE_NAME L"\\\\.\\pipe\\IoMonitorService"
@@ -42,6 +42,8 @@ typedef struct _IO_MONITOR_COMMAND {
     ULONG WaitMilliseconds;
     ULONG OperationMask;
     ULONG ProcessIds[IO_MONITOR_MAX_TARGET_PROCESSES];
+    // Filled by the broker after validating the target process owner.
+    ULONGLONG ProcessCreationTimes100ns[IO_MONITOR_MAX_TARGET_PROCESSES];
 } IO_MONITOR_COMMAND, *PIO_MONITOR_COMMAND;
 
 typedef struct _IO_MONITOR_EVENT {

@@ -32,6 +32,7 @@ typedef struct _IO_MONITOR_TARGET_SNAPSHOT {
     ULONG OperationMask;
     ULONG Generation;
     ULONG ProcessIds[IO_MONITOR_MAX_TARGET_PROCESSES];
+    PEPROCESS ProcessObjects[IO_MONITOR_MAX_TARGET_PROCESSES];
 } IO_MONITOR_TARGET_SNAPSHOT, *PIO_MONITOR_TARGET_SNAPSHOT;
 
 static FAST_MUTEX gTargetUpdateMutex;
@@ -221,8 +222,8 @@ IoMonAcquireTargetSnapshot(VOID)
     }
 }
 
-static BOOLEAN
-IoMonSnapshotContainsProcess(
+static ULONG
+IoMonFindProcessIndex(
     _In_ const IO_MONITOR_TARGET_SNAPSHOT *Snapshot,
     _In_ ULONG ProcessId
     )
@@ -231,10 +232,10 @@ IoMonSnapshotContainsProcess(
     ULONG high;
 
     if (Snapshot->ProcessCount == 0) {
-        return FALSE;
+        return MAXULONG;
     }
     if (Snapshot->ProcessCount == 1) {
-        return Snapshot->ProcessIds[0] == ProcessId;
+        return Snapshot->ProcessIds[0] == ProcessId ? 0 : MAXULONG;
     }
 
     low = 0;
@@ -244,7 +245,7 @@ IoMonSnapshotContainsProcess(
         const ULONG candidate = Snapshot->ProcessIds[middle];
 
         if (candidate == ProcessId) {
-            return TRUE;
+            return middle;
         }
         if (candidate < ProcessId) {
             low = middle + 1;
@@ -252,7 +253,16 @@ IoMonSnapshotContainsProcess(
             high = middle;
         }
     }
-    return FALSE;
+    return MAXULONG;
+}
+
+static BOOLEAN
+IoMonSnapshotContainsProcess(
+    _In_ const IO_MONITOR_TARGET_SNAPSHOT *Snapshot,
+    _In_ ULONG ProcessId
+    )
+{
+    return IoMonFindProcessIndex(Snapshot, ProcessId) != MAXULONG;
 }
 
 static BOOLEAN
@@ -271,6 +281,7 @@ IoMonSnapshotMatches(
 static BOOLEAN
 IoMonGetTargetGeneration(
     _In_ ULONG ProcessId,
+    _In_ PEPROCESS ProcessObject,
     _In_ ULONG Operation,
     _Out_ PULONG Generation
     )
@@ -280,8 +291,11 @@ IoMonGetTargetGeneration(
 
     snapshot = IoMonAcquireTargetSnapshot();
     if (snapshot != NULL) {
-        if (FlagOn(snapshot->OperationMask, Operation) &&
-            IoMonSnapshotContainsProcess(snapshot, ProcessId)) {
+        const ULONG processIndex =
+            IoMonFindProcessIndex(snapshot, ProcessId);
+        if (processIndex != MAXULONG &&
+            snapshot->ProcessObjects[processIndex] == ProcessObject &&
+            FlagOn(snapshot->OperationMask, Operation)) {
             *Generation = snapshot->Generation;
             isTarget = TRUE;
         }
@@ -444,6 +458,7 @@ IoMonStopTargets(
 {
     LONG wasActive;
     ULONG bloomIndex;
+    ULONG processIndex;
 
     ExAcquireFastMutex(&gTargetUpdateMutex);
     wasActive = InterlockedExchange(&gTargetSnapshotActive, FALSE);
@@ -459,6 +474,16 @@ IoMonStopTargets(
     if (wasActive != FALSE) {
         ExWaitForRundownProtectionRelease(&gTargetSnapshot.Rundown);
         gTargetRundownCompleted = TRUE;
+    }
+
+    for (processIndex = 0;
+         processIndex < gTargetSnapshot.ProcessCount;
+         ++processIndex) {
+        if (gTargetSnapshot.ProcessObjects[processIndex] != NULL) {
+            ObDereferenceObject(
+                gTargetSnapshot.ProcessObjects[processIndex]);
+            gTargetSnapshot.ProcessObjects[processIndex] = NULL;
+        }
     }
 
     gTargetSnapshot.ProcessCount = 0;
@@ -478,6 +503,7 @@ IoMonStopTargets(
 static VOID
 IoMonSetTargets(
     _In_reads_(ProcessCount) const ULONG *ProcessIds,
+    _In_reads_(ProcessCount) PEPROCESS const *ProcessObjects,
     _In_ ULONG ProcessCount,
     _In_ ULONG OperationMask
     )
@@ -493,6 +519,15 @@ IoMonSetTargets(
         gTargetRundownCompleted = TRUE;
     }
 
+    for (index = 0;
+         index < gTargetSnapshot.ProcessCount;
+         ++index) {
+        if (gTargetSnapshot.ProcessObjects[index] != NULL) {
+            ObDereferenceObject(gTargetSnapshot.ProcessObjects[index]);
+            gTargetSnapshot.ProcessObjects[index] = NULL;
+        }
+    }
+
     IoMonClearQueue();
     InterlockedExchange64(&gDroppedEvents, 0);
 
@@ -501,22 +536,28 @@ IoMonSetTargets(
         gTargetRundownCompleted = FALSE;
     }
 
-    RtlCopyMemory(
-        gTargetSnapshot.ProcessIds,
-        ProcessIds,
-        ProcessCount * sizeof(ProcessIds[0]));
+    for (index = 0; index < ProcessCount; ++index) {
+        gTargetSnapshot.ProcessIds[index] = ProcessIds[index];
+        gTargetSnapshot.ProcessObjects[index] = ProcessObjects[index];
+        ObReferenceObject(gTargetSnapshot.ProcessObjects[index]);
+    }
 
     for (index = 1; index < ProcessCount; ++index) {
         const ULONG processId = gTargetSnapshot.ProcessIds[index];
+        PEPROCESS processObject =
+            gTargetSnapshot.ProcessObjects[index];
         ULONG insertionIndex = index;
 
         while (insertionIndex != 0 &&
             gTargetSnapshot.ProcessIds[insertionIndex - 1] > processId) {
             gTargetSnapshot.ProcessIds[insertionIndex] =
                 gTargetSnapshot.ProcessIds[insertionIndex - 1];
+            gTargetSnapshot.ProcessObjects[insertionIndex] =
+                gTargetSnapshot.ProcessObjects[insertionIndex - 1];
             --insertionIndex;
         }
         gTargetSnapshot.ProcessIds[insertionIndex] = processId;
+        gTargetSnapshot.ProcessObjects[insertionIndex] = processObject;
     }
 
     gTargetSnapshot.ProcessCount = ProcessCount;
@@ -688,6 +729,7 @@ IoMonPreOperation(
     ULONG requestorProcessId;
     ULONG operation;
     ULONG generation;
+    PEPROCESS requestorProcess;
     PIO_MONITOR_EVENT eventRecord;
     LARGE_INTEGER timestamp;
 
@@ -699,9 +741,15 @@ IoMonPreOperation(
         : IO_MONITOR_OPERATION_WRITE;
     requestorProcessId = FltGetRequestorProcessId(Data);
     if (requestorProcessId == 0 ||
-        !IoMonMightContainTarget(requestorProcessId, operation) ||
+        !IoMonMightContainTarget(requestorProcessId, operation)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    requestorProcess = FltGetRequestorProcess(Data);
+    if (requestorProcess == NULL ||
         !IoMonGetTargetGeneration(
             requestorProcessId,
+            requestorProcess,
             operation,
             &generation)) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
@@ -834,6 +882,7 @@ IoMonMessage(
     ULONG waitMilliseconds;
     ULONG index;
     ULONG previousIndex;
+    PEPROCESS targetProcesses[IO_MONITOR_MAX_TARGET_PROCESSES] = { NULL };
     NTSTATUS status = STATUS_SUCCESS;
 
     UNREFERENCED_PARAMETER(PortCookie);
@@ -874,7 +923,8 @@ IoMonMessage(
         }
         for (index = 0; index < command.TargetProcessCount; ++index) {
             if (command.ProcessIds[index] == 0 ||
-                command.ProcessIds[index] > MAXLONG) {
+                command.ProcessIds[index] > MAXLONG ||
+                command.ProcessCreationTimes100ns[index] == 0) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -887,10 +937,26 @@ IoMonMessage(
             if (!NT_SUCCESS(status)) {
                 break;
             }
+
+            status = PsLookupProcessByProcessId(
+                ULongToHandle(command.ProcessIds[index]),
+                &targetProcesses[index]);
+            if (!NT_SUCCESS(status)) {
+                break;
+            }
+            if ((ULONGLONG)PsGetProcessCreateTimeQuadPart(
+                    targetProcesses[index]) !=
+                command.ProcessCreationTimes100ns[index]) {
+                ObDereferenceObject(targetProcesses[index]);
+                targetProcesses[index] = NULL;
+                status = STATUS_INVALID_CID;
+                break;
+            }
         }
         if (NT_SUCCESS(status)) {
             IoMonSetTargets(
                 command.ProcessIds,
+                targetProcesses,
                 command.TargetProcessCount,
                 command.OperationMask);
         }
@@ -928,6 +994,15 @@ IoMonMessage(
     default:
         status = STATUS_INVALID_PARAMETER;
         break;
+    }
+
+    for (index = 0;
+         index < IO_MONITOR_MAX_TARGET_PROCESSES;
+         ++index) {
+        if (targetProcesses[index] != NULL) {
+            ObDereferenceObject(targetProcesses[index]);
+            targetProcesses[index] = NULL;
+        }
     }
 
     if (NT_SUCCESS(status)) {

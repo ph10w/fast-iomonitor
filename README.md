@@ -241,9 +241,10 @@ same certificate may also sign other locally built test drivers.
   executable name and then includes all matching PIDs found at that time. Matching
   processes started later are not added automatically, nor are child processes
   with a different name.
-- If a PID is reused, the wrong process could briefly be captured when no valid
-  process handle is available. The broker rechecks the user and PID but cannot
-  completely rule out reuse after that check either.
+- If the client cannot open a synchronization handle for a target process, it
+  cannot detect that process exiting automatically. PID reuse still cannot make
+  the driver capture a replacement process because the driver also compares the
+  referenced kernel process object.
 - Paging I/O does not always have a requesting thread. In this case Windows
   reports PID 0; such events cannot be reliably associated with the target PID
   and are not logged.
@@ -263,10 +264,7 @@ same certificate may also sign other locally built test drivers.
 
 ## Next steps toward a robust release
 
-- additionally validate process identity using creation time or the kernel
-  process object
 - add configurable queue and batch sizes and runtime metrics
-- add multiple concurrent clients, log rotation, and robust shutdown semantics
 - run Driver Verifier, Static Driver Verifier, CodeQL, and load tests in a VM
 - plan for a production certificate, assigned altitude, and HLK/compatibility
   testing

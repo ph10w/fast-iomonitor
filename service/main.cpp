@@ -104,7 +104,7 @@ DWORD GetPipeClientUser(HANDLE pipe, std::vector<BYTE>& userBuffer)
     return ERROR_SUCCESS;
 }
 
-DWORD ValidateTargetOwners(HANDLE pipe, const IO_MONITOR_COMMAND& command)
+DWORD ValidateTargetOwners(HANDLE pipe, IO_MONITOR_COMMAND& command)
 {
     if (command.TargetProcessCount == 0 ||
         command.TargetProcessCount > IO_MONITOR_MAX_TARGET_PROCESSES ||
@@ -141,6 +141,26 @@ DWORD ValidateTargetOwners(HANDLE pipe, const IO_MONITOR_COMMAND& command)
             CloseHandle(process);
             return error;
         }
+
+        FILETIME creationTime{};
+        FILETIME exitTime{};
+        FILETIME kernelTime{};
+        FILETIME userTime{};
+        if (!GetProcessTimes(
+                process,
+                &creationTime,
+                &exitTime,
+                &kernelTime,
+                &userTime)) {
+            error = GetLastError();
+            CloseHandle(processToken);
+            CloseHandle(process);
+            return error;
+        }
+        ULARGE_INTEGER creationTimeValue{};
+        creationTimeValue.LowPart = creationTime.dwLowDateTime;
+        creationTimeValue.HighPart = creationTime.dwHighDateTime;
+        command.ProcessCreationTimes100ns[index] = creationTimeValue.QuadPart;
         CloseHandle(process);
 
         std::vector<BYTE> processUserBuffer;
@@ -160,7 +180,7 @@ DWORD ValidateTargetOwners(HANDLE pipe, const IO_MONITOR_COMMAND& command)
     return ERROR_SUCCESS;
 }
 
-DWORD ValidateCommand(HANDLE pipe, const IO_MONITOR_COMMAND& command)
+DWORD ValidateCommand(HANDLE pipe, IO_MONITOR_COMMAND& command)
 {
     if (command.Version != IO_MONITOR_PROTOCOL_VERSION) {
         return ERROR_REVISION_MISMATCH;

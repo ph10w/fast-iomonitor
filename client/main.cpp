@@ -887,7 +887,7 @@ int wmain(int argc, wchar_t* argv[])
             processId);
         if (process == nullptr) {
             std::wcerr << L"Warning: PID " << processId
-                       << L" could not be opened; its exit and PID reuse cannot be detected. "
+                       << L" could not be opened; its exit cannot be detected. "
                        << L"Win32 error " << GetLastError() << L".\n";
         }
 

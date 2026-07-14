@@ -13,7 +13,7 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
   gestarteten `LocalSystem`-Broker zwischen Treiber und normalem Benutzerclient.
 - `client/` enthält `IoMonitorClient.exe`, der ohne Administratorrechte läuft.
 - `shared/io_monitor_protocol.h` definiert das feste Nachrichtenformat für
-  Treiber, Dienst und Client. Die aktuelle Protokollversion ist 6.
+  Treiber, Dienst und Client. Die aktuelle Protokollversion ist 7.
 - Der sichtbare Projektname ist **Fast IoMonitor**. Interne Laufzeitkennungen wie
   `IoMonitor`, `IoMonitorService`, `IoMonitor.sys`, Filter-Port und Named Pipe
   bleiben aus Kompatibilitätsgründen bestehen. Nicht ohne ausdrücklichen
@@ -39,6 +39,9 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
   ergänzt. Der Client endet, sobald alle überwachten Prozesse beendet sind.
 - `--operation Read|Write|All` wird bereits im Treiber gefiltert. Ohne Parameter
   gilt `All`.
+- Der Broker ergänzt nach der Besitzerprüfung die Prozesserstellungszeit. Der
+  Treiber akzeptiert nur die dazu passende Prozessinstanz, hält deren
+  Kernel-Prozessobjekt referenziert und vergleicht es im I/O-Hot-Path.
 - Kann der Treiber einen Dateinamen in einem zulässigen I/O-Kontext nicht sofort
   ermitteln, wird das Ereignis verworfen. Es darf später weder aufgelöst noch mit
   leerem Pfad protokolliert werden.
