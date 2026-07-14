@@ -157,7 +157,9 @@ dependency. It leaves the broker stopped after installation. When
 the monitoring connection and then waits for its named pipe; the Service Control
 Manager starts the dependent minifilter first. While the client is waiting for a
 named process to appear, the broker remains stopped. After draining the event
-queue, the client stops the broker service again.
+queue, the client sends the terminal `STOP` command. The broker replies, closes
+the pipe, and stops its own service process. If that command cannot be completed,
+the client falls back to stopping the service through the Service Control Manager.
 
 The installation script grants the Windows user that runs it permission to query,
 start, and stop the broker service without later elevation. It identifies the
@@ -197,10 +199,12 @@ Command and parameter details:
 
 Only one client can be connected to the broker at a time. Each client can have up
 to 64 unique PIDs belonging to the same Windows user active at once. `Ctrl+C`
-ends both the initial waiting period and active logging. After the first match,
-the client also stops when all detected target processes have exited and it was
-able to open synchronization handles for them. Exited processes are removed from
-the active PID list.
+ends both the initial waiting period and active logging. Closing the console with
+`Alt+F4`, closing its window, or quitting Windows Terminal triggers the same
+best-effort queue drain, CSV flush, and broker shutdown within the Windows console
+close timeout. After the first match, the client also stops when all detected
+target processes have exited and it was able to open synchronization handles for
+them. Exited processes are removed from the active PID list.
 
 ## CSV fields
 

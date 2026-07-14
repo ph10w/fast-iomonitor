@@ -217,7 +217,13 @@ void StopDriverTargets(HANDLE driverPort)
     (void)SendDriverCommand(driverPort, command, response);
 }
 
-bool HandleClient(HANDLE pipe, HANDLE driverPort)
+enum class ClientSessionResult {
+    Disconnected,
+    StopService,
+    Failed
+};
+
+ClientSessionResult HandleClient(HANDLE pipe, HANDLE driverPort)
 {
     while (WaitForSingleObject(gStopEvent, 0) != WAIT_OBJECT_0) {
         IO_MONITOR_COMMAND command{};
@@ -231,7 +237,9 @@ bool HandleClient(HANDLE pipe, HANDLE driverPort)
             const DWORD error = GetLastError();
             return error == ERROR_BROKEN_PIPE ||
                    error == ERROR_NO_DATA ||
-                   error == ERROR_OPERATION_ABORTED;
+                   error == ERROR_OPERATION_ABORTED
+                ? ClientSessionResult::Disconnected
+                : ClientSessionResult::Failed;
         }
 
         IO_MONITOR_PIPE_REPLY reply{};
@@ -253,13 +261,19 @@ bool HandleClient(HANDLE pipe, HANDLE driverPort)
                 pipe,
                 &reply,
                 sizeof(reply),
-                &bytesWritten,
-                nullptr) ||
+            &bytesWritten,
+            nullptr) ||
             bytesWritten != sizeof(reply)) {
-            return false;
+            return ClientSessionResult::Failed;
+        }
+
+        if (command.Command == IO_MONITOR_COMMAND_STOP &&
+            bytesRead == sizeof(command) &&
+            reply.Win32Error == ERROR_SUCCESS) {
+            return ClientSessionResult::StopService;
         }
     }
-    return true;
+    return ClientSessionResult::Disconnected;
 }
 
 DWORD RunPipeServer(HANDLE driverPort)
@@ -296,8 +310,11 @@ DWORD RunPipeServer(HANDLE driverPort)
 
         const BOOL connected = ConnectNamedPipe(pipe, nullptr);
         const DWORD connectError = connected ? ERROR_SUCCESS : GetLastError();
+        bool stopService = false;
         if (connected || connectError == ERROR_PIPE_CONNECTED) {
-            (void)HandleClient(pipe, driverPort);
+            const ClientSessionResult sessionResult =
+                HandleClient(pipe, driverPort);
+            stopService = sessionResult == ClientSessionResult::StopService;
             StopDriverTargets(driverPort);
             FlushFileBuffers(pipe);
             DisconnectNamedPipe(pipe);
@@ -306,7 +323,7 @@ DWORD RunPipeServer(HANDLE driverPort)
         }
 
         CloseHandle(pipe);
-        if (connectError == ERROR_OPERATION_ABORTED) {
+        if (stopService || connectError == ERROR_OPERATION_ABORTED) {
             break;
         }
     }
@@ -388,6 +405,9 @@ void WINAPI ServiceMain(DWORD, PWSTR*)
     ReportServiceStatus(SERVICE_RUNNING, ERROR_SUCCESS, 0);
     const DWORD serverError = RunPipeServer(driverPort);
 
+    if (gStatus.dwCurrentState == SERVICE_RUNNING) {
+        ReportServiceStatus(SERVICE_STOP_PENDING, ERROR_SUCCESS, 5000);
+    }
     StopDriverTargets(driverPort);
     CloseHandle(driverPort);
     CloseHandle(gServiceThread);

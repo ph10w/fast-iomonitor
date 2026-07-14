@@ -18,7 +18,9 @@
 namespace {
 
 volatile LONG gStopRequested = FALSE;
+PVOID volatile gShutdownCompleteEvent = nullptr;
 constexpr DWORD PROCESS_DISCOVERY_INTERVAL_MS = 500;
+constexpr DWORD CONSOLE_CLOSE_WAIT_MS = 4500;
 
 struct TargetProcess {
     ULONG ProcessId;
@@ -41,15 +43,49 @@ BOOL WINAPI ConsoleControlHandler(DWORD controlType)
     switch (controlType) {
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:
-    case CTRL_CLOSE_EVENT:
-    case CTRL_LOGOFF_EVENT:
-    case CTRL_SHUTDOWN_EVENT:
         InterlockedExchange(&gStopRequested, TRUE);
         return TRUE;
+
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT: {
+        InterlockedExchange(&gStopRequested, TRUE);
+        HANDLE shutdownCompleteEvent = static_cast<HANDLE>(
+            InterlockedCompareExchangePointer(
+                &gShutdownCompleteEvent,
+                nullptr,
+                nullptr));
+        if (shutdownCompleteEvent != nullptr) {
+            (void)WaitForSingleObject(
+                shutdownCompleteEvent,
+                CONSOLE_CLOSE_WAIT_MS);
+        }
+        return TRUE;
+    }
+
     default:
         return FALSE;
     }
 }
+
+class ShutdownCompleteGuard {
+public:
+    ShutdownCompleteGuard() = default;
+    ShutdownCompleteGuard(const ShutdownCompleteGuard&) = delete;
+    ShutdownCompleteGuard& operator=(const ShutdownCompleteGuard&) = delete;
+
+    ~ShutdownCompleteGuard()
+    {
+        HANDLE shutdownCompleteEvent = static_cast<HANDLE>(
+            InterlockedCompareExchangePointer(
+                &gShutdownCompleteEvent,
+                nullptr,
+                nullptr));
+        if (shutdownCompleteEvent != nullptr) {
+            SetEvent(shutdownCompleteEvent);
+        }
+    }
+};
 
 std::string WideToUtf8(const WCHAR* value, std::size_t length)
 {
@@ -378,6 +414,14 @@ bool EnsureBrokerServiceRunning(HRESULT& result)
     bool succeeded = false;
 
     for (;;) {
+        if (InterlockedCompareExchange(
+                &gStopRequested,
+                FALSE,
+                FALSE) != FALSE) {
+            result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            break;
+        }
+
         SERVICE_STATUS_PROCESS status{};
         DWORD bytesNeeded = 0;
         if (!QueryServiceStatusEx(
@@ -731,6 +775,26 @@ int wmain(int argc, wchar_t* argv[])
         return 2;
     }
 
+    HANDLE shutdownCompleteEvent = CreateEventW(
+        nullptr,
+        TRUE,
+        FALSE,
+        nullptr);
+    if (shutdownCompleteEvent == nullptr) {
+        std::wcerr << L"Cannot create shutdown event. Win32 error "
+                   << GetLastError() << L".\n";
+        return 3;
+    }
+    InterlockedExchangePointer(
+        &gShutdownCompleteEvent,
+        shutdownCompleteEvent);
+    ShutdownCompleteGuard shutdownCompleteGuard;
+    if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE)) {
+        std::wcerr << L"Cannot install console control handler. Win32 error "
+                   << GetLastError() << L".\n";
+        return 3;
+    }
+
     std::vector<ULONG> processIds;
     if (explicitProcessId != 0) {
         processIds.push_back(explicitProcessId);
@@ -742,7 +806,6 @@ int wmain(int argc, wchar_t* argv[])
             return 3;
         }
         if (processIds.empty()) {
-            SetConsoleCtrlHandler(ConsoleControlHandler, TRUE);
             std::wcout << L"Waiting for " << processName
                        << L" to start. Press Ctrl+C to stop.\n"
                        << std::flush;
@@ -765,14 +828,12 @@ int wmain(int argc, wchar_t* argv[])
                         processName,
                         processIds,
                         enumerationError)) {
-                    SetConsoleCtrlHandler(ConsoleControlHandler, FALSE);
                     std::wcerr << L"Cannot enumerate processes. Win32 error "
                                << enumerationError << L".\n";
                     return 3;
                 }
             }
 
-            SetConsoleCtrlHandler(ConsoleControlHandler, FALSE);
             if (InterlockedCompareExchange(
                     &gStopRequested,
                     FALSE,
@@ -789,8 +850,12 @@ int wmain(int argc, wchar_t* argv[])
         return 3;
     }
 
+    BrokerServiceStopGuard serviceStopGuard;
     HRESULT serviceResult = S_OK;
     if (!EnsureBrokerServiceRunning(serviceResult)) {
+        if (serviceResult == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+            return 0;
+        }
         std::cerr << "Cannot start "
                   << WideToUtf8(
                          IO_MONITOR_SERVICE_NAME,
@@ -799,7 +864,13 @@ int wmain(int argc, wchar_t* argv[])
                   << ". Verify that the service is installed and that this user has start permission.\n";
         return 4;
     }
-    BrokerServiceStopGuard serviceStopGuard;
+
+    if (InterlockedCompareExchange(
+            &gStopRequested,
+            FALSE,
+            FALSE) != FALSE) {
+        return 0;
+    }
 
     std::vector<TargetProcess> targets;
     std::unordered_map<ULONG, std::string> processImages;
@@ -830,6 +901,14 @@ int wmain(int argc, wchar_t* argv[])
         targets.push_back({processId, process});
     }
 
+    if (InterlockedCompareExchange(
+            &gStopRequested,
+            FALSE,
+            FALSE) != FALSE) {
+        CloseTargets(targets);
+        return 0;
+    }
+
     bool writeHeader = !append;
     if (append) {
         std::error_code error;
@@ -850,9 +929,20 @@ int wmain(int argc, wchar_t* argv[])
         csv << "timestamp_utc,process_image,operation,success,path\n";
     }
 
-    if (!WaitNamedPipeW(IO_MONITOR_PIPE_NAME, 3000) &&
-        GetLastError() != ERROR_SEM_TIMEOUT) {
-        const HRESULT result = HRESULT_FROM_WIN32(GetLastError());
+    const bool pipeAvailable =
+        WaitNamedPipeW(IO_MONITOR_PIPE_NAME, 3000) != FALSE;
+    const DWORD pipeWaitError = pipeAvailable
+        ? ERROR_SUCCESS
+        : GetLastError();
+    if (InterlockedCompareExchange(
+            &gStopRequested,
+            FALSE,
+            FALSE) != FALSE) {
+        CloseTargets(targets);
+        return 0;
+    }
+    if (!pipeAvailable && pipeWaitError != ERROR_SEM_TIMEOUT) {
+        const HRESULT result = HRESULT_FROM_WIN32(pipeWaitError);
         std::cerr << "Cannot find IoMonitorService named pipe. HRESULT "
                   << FormatHresult(result)
                   << ". Verify that IoMonitorService is installed and running.\n";
@@ -887,6 +977,15 @@ int wmain(int argc, wchar_t* argv[])
         return 4;
     }
 
+    if (InterlockedCompareExchange(
+            &gStopRequested,
+            FALSE,
+            FALSE) != FALSE) {
+        CloseHandle(port);
+        CloseTargets(targets);
+        return 0;
+    }
+
     HRESULT result = S_OK;
     IO_MONITOR_RESPONSE response{};
     if (!SendCommand(
@@ -904,7 +1003,6 @@ int wmain(int argc, wchar_t* argv[])
         return 5;
     }
 
-    SetConsoleCtrlHandler(ConsoleControlHandler, TRUE);
     ULONGLONG lastDroppedEvents = 0;
     unsigned long rowsSinceFlush = 0;
     bool allTargetsExited = false;
@@ -1009,16 +1107,21 @@ int wmain(int argc, wchar_t* argv[])
         }
     }
 
-    IO_MONITOR_RESPONSE ignoredResponse{};
-    HRESULT ignoredResult = S_OK;
-    (void)SendCommand(
+    IO_MONITOR_RESPONSE stopResponse{};
+    HRESULT stopResult = S_OK;
+    const bool serviceOwnsShutdown = SendCommand(
         port,
         IO_MONITOR_COMMAND_STOP,
         {},
         0,
         0,
-        ignoredResponse,
-        ignoredResult);
+        stopResponse,
+        stopResult);
+    if (!serviceOwnsShutdown) {
+        std::cerr << "Could not delegate shutdown to IoMonitorService. HRESULT "
+                  << FormatHresult(stopResult) << ".\n";
+        shutdownSucceeded = false;
+    }
 
     csv.flush();
     if (!csv) {
@@ -1027,13 +1130,14 @@ int wmain(int argc, wchar_t* argv[])
     }
     CloseHandle(port);
     CloseTargets(targets);
-    SetConsoleCtrlHandler(ConsoleControlHandler, FALSE);
 
-    HRESULT serviceStopResult = S_OK;
-    if (!StopBrokerService(serviceStopResult)) {
-        std::cerr << "Could not stop IoMonitorService. HRESULT "
-                  << FormatHresult(serviceStopResult) << ".\n";
-        shutdownSucceeded = false;
+    if (!serviceOwnsShutdown) {
+        HRESULT serviceStopResult = S_OK;
+        if (!StopBrokerService(serviceStopResult)) {
+            std::cerr << "Could not stop IoMonitorService. HRESULT "
+                      << FormatHresult(serviceStopResult) << ".\n";
+            shutdownSucceeded = false;
+        }
     }
     serviceStopGuard.Dismiss();
 

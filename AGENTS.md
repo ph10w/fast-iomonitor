@@ -13,7 +13,7 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
   gestarteten `LocalSystem`-Broker zwischen Treiber und normalem Benutzerclient.
 - `client/` enthält `IoMonitorClient.exe`, der ohne Administratorrechte läuft.
 - `shared/io_monitor_protocol.h` definiert das feste Nachrichtenformat für
-  Treiber, Dienst und Client. Die aktuelle Protokollversion ist 5.
+  Treiber, Dienst und Client. Die aktuelle Protokollversion ist 6.
 - Der sichtbare Projektname ist **Fast IoMonitor**. Interne Laufzeitkennungen wie
   `IoMonitor`, `IoMonitorService`, `IoMonitor.sys`, Filter-Port und Named Pipe
   bleiben aus Kompatibilitätsgründen bestehen. Nicht ohne ausdrücklichen
@@ -27,8 +27,13 @@ Prozesse erfasst und als UTF-8-CSV ausgibt.
 - Der Client akzeptiert `--process-name` oder alternativ `--pid`.
 - Sobald die Ziel-PIDs bekannt sind, startet der Client den Broker-Dienst und
   beendet ihn nach dem Leeren der Event-Queue beim eigenen Abschluss wieder.
+- `IO_MONITOR_COMMAND_STOP` ist der letzte Befehl einer Client-Sitzung. Nach der
+  Antwort schließt der Broker die Pipe und beendet seinen Dienstprozess selbst.
 - Ist bei `--process-name` noch kein Prozess vorhanden, wartet der Client und
   sucht alle 500 ms. `Strg+C` muss auch diese Wartephase beenden.
+- `Alt+F4`, das Schließen des Konsolenfensters und das Beenden von Windows
+  Terminal sollen innerhalb des Windows-Zeitlimits denselben geordneten
+  Abschluss wie `Strg+C` auslösen.
 - Nach dem ersten Treffer werden die zu diesem Zeitpunkt gefundenen PIDs
   überwacht. Später gestartete gleichnamige Prozesse werden derzeit nicht
   ergänzt. Der Client endet, sobald alle überwachten Prozesse beendet sind.
