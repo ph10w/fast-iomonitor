@@ -1,0 +1,58 @@
+[Version]
+Signature   = "$Windows NT$"
+Class       = ActivityMonitor
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderName%
+DriverVer   = 07/14/2026,1.0.0.0
+CatalogFile = IoMonitor.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+IoMonitor.DriverFiles = 13
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = IoMonitor.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,IoMonitor.Service
+
+[IoMonitor.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %13%\IoMonitor.sys
+ServiceType    = 2
+StartType      = 3
+ErrorControl   = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = IoMonitor.AddRegistry
+Dependencies   = FltMgr
+
+[IoMonitor.AddRegistry]
+; Windows 10 and Windows 11 before 24H2 read minifilter instances directly
+; below the service key.
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Instances\%DefaultInstance%","Flags",0x00010001,0x0
+; Starting with Windows 11 24H2, Filter Manager reads them below Parameters.
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Parameters\Instances\%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Parameters\Instances\%DefaultInstance%","Flags",0x00010001,0x0
+
+[IoMonitor.DriverFiles]
+IoMonitor.sys
+
+[SourceDisksFiles]
+IoMonitor.sys = 1
+
+[SourceDisksNames]
+1 = %InstallationMedia%,,,
+
+[Strings]
+ProviderName       = "Fast IoMonitor"
+ServiceName        = "IoMonitor"
+ServiceDescription = "Fast IoMonitor read/write activity minifilter (development/test)"
+DefaultInstance    = "IoMonitor Instance"
+; Test-only value. Obtain an assigned altitude before distribution.
+DefaultAltitude    = "385201"
+InstallationMedia  = "Fast IoMonitor installation media"

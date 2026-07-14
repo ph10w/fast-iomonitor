@@ -1,0 +1,9 @@
+.vs/
+bin/
+obj/
+packages/
+.iomonitor-cert-state.json
+*.user
+
+# Local monitoring output
+io_access.csv
